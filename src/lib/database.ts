@@ -1,21 +1,39 @@
 import * as SQLite from 'wa-sqlite';
 import SQLiteESMFactory from 'wa-sqlite/dist/wa-sqlite.mjs';
 
-export interface DatabaseManager {
-  db: number;
-  sqlite3: any;
+export interface DbLifecycle {
+  initialize(): Promise<void>;
   close(): Promise<void>;
+}
+
+export interface OpDb {
+  expandObservationSets(observationSets: Set<string>) : Promise<Set<string>>;
+  unionObservationSets(observationSets : Set<string>) : Promise<string | null>;
+}
+
+export interface QueryExecutor {
   execute(sql: string, params?: any[]): Promise<void>;
   query(sql: string, params?: any[]): Promise<any[]>;
 }
 
-/**
- * Initialize SQLite WASM module
- */
-async function initSQLite() {
-  const module = await SQLiteESMFactory();
-  const sqlite3 = SQLite.Factory(module);
-  return sqlite3;
+export abstract class SqlOpDb implements OpDb, QueryExecutor {
+  abstract execute(sql: string, params?: any[]): Promise<void>;
+  abstract query(sql: string, params?: any[]): Promise<any[]>;
+
+  async expandObservationSets(observationSets: Set<string>): Promise<Set<string>> {
+    if (observationSets.size == 0) {
+      return observationSets
+    }
+    throw Error("observation set expansion not yet implemented")
+  }
+
+  async unionObservationSets(observationSets: Set<string>): Promise<string | null> {
+    if (observationSets.size <= 1) {
+      const { value, done } = observationSets.values().next();
+      return done ? null : value;
+    }
+    throw Error("observation set union not yet implemented")
+  }
 }
 
 /**
@@ -183,64 +201,85 @@ JOIN op_outputs o
  AND o.idx    = i.producer_output_idx;
 `;
 
+export class SqliteOpDb extends SqlOpDb implements DbLifecycle {
+  constructor(
+    public db: number,
+    public sqlite3: any
+  ) { 
+    super();
+  }
+
+  async initialize(): Promise<void> {
+    await this.sqlite3.exec(this.db, SCHEMA_SQL);
+  }
+
+  async close(): Promise<void> {
+    await this.sqlite3.close(this.db);
+  }
+
+  async execute(sql: string, params?: any[]): Promise<void> {
+    if (params && params.length > 0) {
+      for await (const stmt of this.sqlite3.statements(this.db, sql)) {
+        this.sqlite3.bind_collection(stmt, params);
+        await this.sqlite3.step(stmt);
+      }
+    } else {
+      await this.sqlite3.exec(this.db, sql);
+    }
+  }
+
+  async query(sql: string, params?: any[]): Promise<any[]> {
+    const results: any[] = [];
+    for await (const stmt of this.sqlite3.statements(this.db, sql)) {
+      if (params && params.length > 0) {
+        this.sqlite3.bind_collection(stmt, params);
+      }
+      const columns = this.sqlite3.column_names(stmt);
+      while (await this.sqlite3.step(stmt) === SQLite.SQLITE_ROW) {
+        const row: any = {};
+        columns.forEach((col: any, i: number) => {
+          row[col] = this.sqlite3.column(stmt, i);
+        });
+        results.push(row);
+      }
+    }
+    return results;
+  }
+}
+
+/**
+ * Initialize SQLite WASM module
+ */
+async function initSQLite() {
+  const module = await SQLiteESMFactory();
+  const sqlite3 = SQLite.Factory(module);
+  return sqlite3;
+}
+
 /**
  * Create a new in-memory database
  */
-export async function createInMemoryDatabase(): Promise<DatabaseManager> {
+export async function createInMemoryDatabase(): Promise<SqliteOpDb> {
   const sqlite3 = await initSQLite();
   const db = await sqlite3.open_v2(':memory:');
-  
-  // Create schema
-  await sqlite3.exec(db, SCHEMA_SQL);
-  
+
   console.log('DB opened successfully (in-memory database)');
-  
-  return {
-    db,
-    sqlite3,
-    async close() {
-      await sqlite3.close(db);
-    },
-    async execute(sql: string, params?: any[]) {
-      if (params && params.length > 0) {
-        for await (const stmt of sqlite3.statements(db, sql)) {
-          sqlite3.bind_collection(stmt, params);
-          await sqlite3.step(stmt);
-        }
-      } else {
-        await sqlite3.exec(db, sql);
-      }
-    },
-    async query(sql: string, params?: any[]) {
-      const results: any[] = [];
-      for await (const stmt of sqlite3.statements(db, sql)) {
-        if (params && params.length > 0) {
-          sqlite3.bind_collection(stmt, params);
-        }
-        const columns = sqlite3.column_names(stmt);
-        while (await sqlite3.step(stmt) === SQLite.SQLITE_ROW) {
-          const row: any = {};
-          columns.forEach((col, i) => {
-            row[col] = sqlite3.column(stmt, i);
-          });
-          results.push(row);
-        }
-      }
-      return results;
-    }
-  };
+
+  const dbm = new SqliteOpDb(db, sqlite3);
+  await dbm.initialize();
+  return dbm;
 }
 
 /**
  * Open an existing SQLite file
  */
-export async function openExistingDatabase(file: File): Promise<DatabaseManager> {
+export async function openExistingDatabase(file: File): Promise<SqliteOpDb> {
   throw new Error(`Opening existing SQLite files is not yet implemented. File: ${file.name}`);
 }
 
 /**
  * Export database to downloadable file
  */
-export async function exportDatabase(dbManager: DatabaseManager, filename: string = 'scrapebook.sqlite'): Promise<void> {
+export async function exportDatabase(dbManager: SqliteOpDb, filename: string = 'scrapebook.sqlite'): Promise<void> {
   throw new Error(`Exporting SQLite files is not yet implemented. File: ${filename}`);
 }

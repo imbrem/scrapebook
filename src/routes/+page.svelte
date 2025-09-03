@@ -1,8 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { createInMemoryDatabase, openExistingDatabase, type DatabaseManager } from '$lib/database.js';
+  import { createInMemoryDatabase, openExistingDatabase, type SqliteOpDb } from '$lib/database.js';
 
-  let dbManager: DatabaseManager | null = null;
+  let dbManager: SqliteOpDb | null = null;
   let statusText = 'Not connected';
   let status = 'DISCONNECTED';
   let fileInput: HTMLInputElement;
