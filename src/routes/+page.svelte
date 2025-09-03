@@ -8,6 +8,9 @@
 
   async function createNewDatabase() {
     try {
+      // If a database is currently open, close it
+      await closeDatabase();
+
       status = 'Creating in-memory database...';
       dbManager = await createInMemoryDatabase();
       status = 'Connected to in-memory database';
@@ -21,6 +24,9 @@
   }
 
   async function openFileDatabase() {
+    // If a database is currently open, close it
+    await closeDatabase();
+
     const file = fileInput.files?.[0];
     if (!file) {
       alert('Please select a file first');

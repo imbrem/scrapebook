@@ -28,7 +28,7 @@ async function initSQLite() {
  *   An op may also be an *alias* (structural), but aliasing is orthogonal to class.
  * • op_inputs: wire consumer input slots to producer output slots.
  * • op_outputs: payload bytes per producer output slot (0..n-1).
- * • composite_ground_truth: content-addressed sets for multi-origin ground truths.
+ * • observation_sets: content-addressed sets for multi-origin ground truths.
  * • artifacts: optional content-addressed byte store (useful for GC/dedupe).
  * 
  * Classes (derived; see v_ops_class):
@@ -45,7 +45,7 @@ const SCHEMA_SQL = `
      An op may also be an *alias* (structural), but aliasing is orthogonal to class.
    • op_inputs: wire consumer input slots to producer output slots.
    • op_outputs: payload bytes per producer output slot (0..n-1).
-   • composite_ground_truth: content-addressed sets for multi-origin ground truths.
+   • observation_sets: content-addressed sets for multi-origin ground truths.
    • artifacts: optional content-addressed byte store (useful for GC/dedupe).
    -----------------------------------------------------------------------------
    Classes (derived; see v_ops_class):
@@ -77,20 +77,6 @@ const SCHEMA_SQL = `
            SimpleOp2 may be observations.
          - If ComplexOp is a transform, then neither SimpleOp nor SimpleOp2
            may be analyses or observations.
-
-   Ground truth (app-side)
-     • Observation: ground_truth := op_key (early return).
-     • Otherwise:
-         L := [non-NULL ground_truths of input producers]
-         sort & dedupe → expand any composite members → sort & dedupe
-         → NULL / single / composite (insert composite row if new)
-
-   Input digest (app-side)
-     • input_digest := sha256(op_type || 0x00 || tool_id || 0x00 ||
-                              canon(params_json) || 0x00 ||
-                              concat(h_i))
-     • Here h_i are the **raw input bytes**, concatenated in input-slot order
-       (multiplicity preserved), not hashes. This makes transforms content-defined.
    ============================================================================= */
 
 
@@ -115,14 +101,15 @@ CREATE TABLE IF NOT EXISTS ops (
   tool_id       TEXT NOT NULL,      -- e.g. 'requests_v1','bs4_v1','rules_v2'
   params_json   TEXT,               -- canonical JSON (sorted keys, stable forms)
 
-  input_digest  BLOB NOT NULL,      -- 32B
+  input_digest  BLOB NOT NULL,      -- 32B SHA-256 hash
 
   ground_truth  BLOB,               -- 32B; NULL only if synthetic / no provenance
   observed_at   TEXT,               -- optional wall clock; MUST be NULL unless observation
 
   alias         BLOB,               -- nullable: op_key this row *encapsulates* (outputs copied)
 
-  CHECK ( (observed_at IS NULL) OR (ground_truth = op_key) )
+  CHECK ( (observed_at IS NULL) OR (op_key = ground_truth) )
+  CHECK ( (input_digest <> ground_truth) )
 );
 
 -- Helpful indexes
@@ -161,13 +148,11 @@ CREATE INDEX IF NOT EXISTS idx_op_inputs_producer ON op_inputs(producer_op_key, 
 /* =======================
    COMPOSITE GROUND TRUTH (hash → sorted members)
    ======================= */
-CREATE TABLE IF NOT EXISTS composite_ground_truth (
-  composite_hash  BLOB PRIMARY KEY,  -- 32B
-  members_blob    BLOB NOT NULL      -- 32*n bytes (n >= 2), members in ascending byte order
+CREATE TABLE IF NOT EXISTS observation_sets (
+  set_hash      BLOB NOT NULL,    -- SHA-256 hash of the keys in this set in sorted order
+  member        BLOB NOT NULL,    -- op_key which is a member of this set 
+  PRIMARY KEY (set_hash, member)
 );
-
-CREATE INDEX IF NOT EXISTS idx_cgt_members_len ON composite_ground_truth(length(members_blob));
-
 
 /* =======================
    VIEWS (summaries)
@@ -184,20 +169,6 @@ SELECT
   END AS op_class
 FROM ops o;
 
--- Ground truth kind
-CREATE VIEW IF NOT EXISTS v_ops_ground_kind AS
-SELECT
-  o.*,
-  CASE
-    WHEN o.ground_truth IS NULL THEN 'synthetic'
-    WHEN EXISTS (SELECT 1 FROM ops x WHERE x.op_key = o.ground_truth)
-         THEN 'single_origin'
-    WHEN EXISTS (SELECT 1 FROM composite_ground_truth c WHERE c.composite_hash = o.ground_truth)
-         THEN 'composite_origin'
-    ELSE 'unknown_single'
-  END AS ground_kind
-FROM ops o;
-
 -- Consumer inputs joined to producer outputs (aliases work since outputs are copied)
 CREATE VIEW IF NOT EXISTS v_inputs_resolved AS
 SELECT
@@ -210,81 +181,6 @@ FROM op_inputs i
 JOIN op_outputs o
   ON o.op_key = i.producer_op_key
  AND o.idx    = i.producer_output_idx;
-
-
-/* =============================================================================
-   OPTIONAL / NON-SEMANTIC SECTION (GC, provenance, audits)
-   ============================================================================= */
-
--- Per-slot artifact linkage (signed indices)
---   input slot s → idx = -(s+1); output slot s → idx = s
-CREATE TABLE IF NOT EXISTS artifact_slots (
-  artifact_hash  BLOB NOT NULL,   -- 32B
-  op_key         BLOB NOT NULL,
-  idx            INTEGER NOT NULL,
-  PRIMARY KEY (artifact_hash, op_key, idx)
-);
-
-CREATE INDEX IF NOT EXISTS idx_slots_op_in     ON artifact_slots(op_key, idx) WHERE idx < 0;
-CREATE INDEX IF NOT EXISTS idx_slots_op_out    ON artifact_slots(op_key, idx) WHERE idx >= 0;
-CREATE INDEX IF NOT EXISTS idx_slots_artifact  ON artifact_slots(artifact_hash);
-
--- Decoded conveniences
-CREATE VIEW IF NOT EXISTS v_artifact_inputs AS
-SELECT op_key, (-idx - 1) AS slot_idx, artifact_hash
-FROM artifact_slots WHERE idx < 0;
-
-CREATE VIEW IF NOT EXISTS v_artifact_outputs AS
-SELECT op_key, idx AS slot_idx, artifact_hash
-FROM artifact_slots WHERE idx >= 0;
-
--- Old-style links (for GC tools that expect "consumed/produced")
-CREATE VIEW IF NOT EXISTS artifact_links_consumed AS
-SELECT s.op_key, 'consumed' AS direction, (-s.idx - 1) AS slot_idx, s.artifact_hash
-FROM artifact_slots s WHERE idx < 0;
-
-CREATE VIEW IF NOT EXISTS artifact_links_produced AS
-SELECT s.op_key, 'produced' AS direction, s.idx AS slot_idx, s.artifact_hash
-FROM artifact_slots s WHERE idx >= 0;
-
-CREATE VIEW IF NOT EXISTS artifact_links AS
-SELECT * FROM artifact_links_consumed
-UNION ALL
-SELECT * FROM artifact_links_produced;
-
--- GC helpers
-CREATE VIEW IF NOT EXISTS v_live_artifacts AS
-SELECT DISTINCT artifact_hash FROM artifact_slots;
-
-CREATE VIEW IF NOT EXISTS v_missing_artifacts AS
-SELECT DISTINCT s.artifact_hash
-FROM artifact_slots s
-LEFT JOIN artifacts a USING (artifact_hash)
-WHERE a.artifact_hash IS NULL;
-
-CREATE VIEW IF NOT EXISTS v_purged_artifacts AS
-SELECT DISTINCT s.artifact_hash
-FROM artifact_slots s
-JOIN artifacts a USING (artifact_hash)
-WHERE a.bytes IS NULL;
-
-CREATE VIEW IF NOT EXISTS v_missing_or_purged_artifacts AS
-SELECT DISTINCT s.artifact_hash
-FROM artifact_slots s
-LEFT JOIN artifacts a USING (artifact_hash)
-WHERE a.artifact_hash IS NULL OR a.bytes IS NULL;
-
-CREATE VIEW IF NOT EXISTS v_artifact_health AS
-SELECT
-  s.artifact_hash,
-  CASE
-    WHEN a.artifact_hash IS NULL THEN 'missing_row'
-    WHEN a.bytes IS NULL          THEN 'purged_bytes'
-    ELSE 'ok'
-  END AS status
-FROM artifact_slots s
-LEFT JOIN artifacts a USING (artifact_hash)
-GROUP BY s.artifact_hash;
 `;
 
 /**
