@@ -1,5 +1,6 @@
 import * as SQLite from 'wa-sqlite';
 import SQLiteESMFactory from 'wa-sqlite/dist/wa-sqlite.mjs';
+import type { Jsonifiable } from 'type-fest';
 
 export class OpKey {
   static readonly BYTE_LENGTH = 32;
@@ -20,27 +21,33 @@ export class OpKey {
   }
 
   /** SHA-256 of input (ArrayBuffer or view or string) */
-  static async sha256(input: ArrayBuffer | ArrayBufferView | string): Promise<OpKey> {
-    let buffer: ArrayBuffer;
-    if (typeof input === "string") {
-      const encoded = new TextEncoder().encode(input);
-      buffer = encoded.buffer.slice(encoded.byteOffset, encoded.byteOffset + encoded.byteLength);
-    } else if (input instanceof ArrayBuffer) {
-      buffer = input;
-    } else {
-      // For ArrayBufferView, copy to a new ArrayBuffer
-      const view = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
-      const newBuffer = new ArrayBuffer(view.byteLength);
-      new Uint8Array(newBuffer).set(view);
-      buffer = newBuffer;
-    }
-    const digest = await crypto.subtle.digest("SHA-256", buffer);
+  static async sha256(input: string | BufferSource): Promise<OpKey> {
+    const data =
+      typeof input === "string"
+        ? new TextEncoder().encode(input)
+        : input instanceof ArrayBuffer
+          ? new Uint8Array(input)
+          : new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+
+    const digest = await crypto.subtle.digest("SHA-256", data);
     return new OpKey(new Uint8Array(digest));
   }
 
   /** Copy raw bytes out */
   toBytes(): Uint8Array {
     return new Uint8Array(this.#bytes);
+  }
+
+  /** Convert to hex string */
+  toHex(): string {
+    return Array.from(this.#bytes)
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+  }
+
+  /** String representation (hex) */
+  toString(): string {
+    return this.toHex();
   }
 
   /** Constant-time equality */
@@ -64,7 +71,7 @@ export class OpKey {
    * Extend: SHA256( "OpKey/extend" || key || u32be(len(data)) || data )
    * Length prefix prevents concatenation ambiguities for variable-length data.
    */
-  async extend(newData: ArrayBuffer | ArrayBufferView | string): Promise<OpKey> {
+  async extend(newData: string | BufferSource): Promise<OpKey> {
     const data =
       typeof newData === "string"
         ? new TextEncoder().encode(newData)
@@ -82,6 +89,53 @@ export class OpKey {
   }
 }
 
+export class OpOutput {
+  constructor(
+    public readonly opKey: OpKey,
+    public readonly slotId: number
+  ) {
+    if (!Number.isInteger(slotId) || slotId < 0) {
+      throw new Error(`Output slot ID must be a non-negative integer, got ${slotId}`);
+    }
+  }
+
+  toString(): string {
+    return `${this.opKey.toHex()}:${this.slotId}`;
+  }
+
+  equals(other: OpOutput): boolean {
+    return this.opKey.equals(other.opKey) && this.slotId === other.slotId;
+  }
+
+  /** For use as Map/Set keys */
+  toKey(): string {
+    return this.toString();
+  }
+}
+
+export class OpInput {
+  constructor(
+    public readonly opKey: OpKey,
+    public readonly slotId: number
+  ) {
+    if (!Number.isInteger(slotId) || slotId < 0) {
+      throw new Error(`Input slot ID must be a non-negative integer, got ${slotId}`);
+    }
+  }
+
+  toString(): string {
+    return `${this.opKey.toHex()}:${this.slotId}`;
+  }
+
+  equals(other: OpInput): boolean {
+    return this.opKey.equals(other.opKey) && this.slotId === other.slotId;
+  }
+
+  /** For use as Map/Set keys */
+  toKey(): string {
+    return this.toString();
+  }
+}
 
 export interface DbLifecycle {
   initialize(): Promise<void>;
@@ -89,6 +143,14 @@ export interface DbLifecycle {
 }
 
 export interface OpDb {
+  registerTransform(op_type: string, tool_id: string, params: Jsonifiable, inputs: OpOutput[])
+    : Promise<OpKey>;
+  getOutput(output: OpOutput): Promise<Uint8Array>;
+  getInput(input: OpInput): Promise<Uint8Array>;
+  resolveInput(input: OpInput): Promise<OpOutput>;
+  getOutputs(op: OpKey): Promise<Uint8Array[]>;
+  getInputs(op: OpKey): Promise<Uint8Array[]>;
+  resolveInputs(op: OpKey): Promise<OpOutput[]>;
   expandObservationSets(observationSets: Set<string>): Promise<Set<string>>;
   unionObservationSets(observationSets: Set<string>): Promise<string | null>;
 }
@@ -101,6 +163,43 @@ export interface QueryExecutor {
 export abstract class SqlOpDb implements OpDb, QueryExecutor {
   abstract execute(sql: string, params?: any[]): Promise<void>;
   abstract query(sql: string, params?: any[]): Promise<any[]>;
+
+  async registerTransform(
+    op_type: string, tool_id: string, params: Jsonifiable, inputs: OpOutput[]
+  ): Promise<OpKey> {
+    throw Error("registerTransform not yet implemented")
+  }
+
+  async getOutput(output: OpOutput): Promise<Uint8Array> {
+    throw Error("getOutput not yet implemented")
+  }
+
+  async getInput(input: OpInput): Promise<Uint8Array> {
+    //TODO: can optimize with SQL
+    const output = await this.resolveInput(input);
+    return await this.getOutput(output);
+  }
+
+  async resolveInput(input: OpInput): Promise<OpOutput> {
+    throw Error("resolveInput not yet implemented")
+  }
+
+  async getOutputs(op: OpKey): Promise<Uint8Array[]> {
+    throw Error("getOutputs not yet implemented")
+  }
+
+  async getInputs(op: OpKey): Promise<Uint8Array[]> {
+    //TODO: can optimize with SQL
+    var result : Uint8Array[] = []
+    for (const output of await this.resolveInputs(op)) {
+      result.push(await this.getOutput(output));
+    }
+    return result;
+  }
+
+  async resolveInputs(op: OpKey): Promise<OpOutput[]> {
+    throw Error("resolveOutputs not yet implemented")
+  }
 
   async expandObservationSets(observationSets: Set<string>): Promise<Set<string>> {
     if (observationSets.size == 0) {

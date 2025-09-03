@@ -29,6 +29,7 @@
 		"vitest-browser-svelte": "^0.1.0"
 	},
 	"dependencies": {
+		"type-fest": "^4.41.0",
 		"wa-sqlite": "^1.0.0"
 	}
 }
