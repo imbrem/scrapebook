@@ -19,5 +19,7 @@ jobs:
         run: bun install
       - name: Run check
         run: bun run check
+      - name: Install Playwright Browsers
+        run: bunx playwright install --with-deps
       - name: Run tests
         run: bun run test
