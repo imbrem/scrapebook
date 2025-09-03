@@ -3,7 +3,8 @@
   import { createInMemoryDatabase, openExistingDatabase, type DatabaseManager } from '$lib/database.js';
 
   let dbManager: DatabaseManager | null = null;
-  let status = 'Not connected';
+  let statusText = 'Not connected';
+  let status = 'DISCONNECTED';
   let fileInput: HTMLInputElement;
 
   async function createNewDatabase() {
@@ -11,15 +12,18 @@
       // If a database is currently open, close it
       await closeDatabase();
 
-      status = 'Creating in-memory database...';
+      statusText = 'Creating in-memory database...';
+      status = 'CONNECTING';
       dbManager = await createInMemoryDatabase();
-      status = 'Connected to in-memory database';
-      
+      statusText = 'Connected to in-memory database';
+      status = 'CONNECTED';
+
       // Test the database by inserting a sample record
       await testDatabase();
     } catch (error) {
       console.error('Failed to create database:', error);
-      status = `Error: ${error}`;
+      statusText = `${error}`;
+      status = 'ERROR';
     }
   }
 
@@ -34,15 +38,18 @@
     }
 
     try {
-      status = `Opening database from ${file.name}...`;
+      statusText = `Opening database from ${file.name}...`;
+      status = 'CONNECTING';
       dbManager = await openExistingDatabase(file);
-      status = `Connected to database: ${file.name}`;
-      
+      statusText = `Connected to database: ${file.name}`;
+      status = 'CONNECTED';
+
       // Test the database
       await testDatabase();
     } catch (error) {
       console.error('Failed to open database:', error);
-      status = `Error: ${error}`;
+      statusText = `${error}`;
+      status = 'ERROR';
     }
   }
 
@@ -69,7 +76,8 @@
     if (dbManager) {
       await dbManager.close();
       dbManager = null;
-      status = 'Disconnected';
+      statusText = 'Disconnected';
+      status = 'DISCONNECTED';
     }
   }
 
@@ -84,7 +92,7 @@
   <p>SQLite Database Test - First Milestone</p>
   
   <div class="status">
-    <strong>Status:</strong> {status}
+    <strong>Status ({status}):</strong> {statusText}
   </div>
 
   <div class="controls">

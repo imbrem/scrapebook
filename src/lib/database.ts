@@ -235,72 +235,12 @@ export async function createInMemoryDatabase(): Promise<DatabaseManager> {
  * Open an existing SQLite file
  */
 export async function openExistingDatabase(file: File): Promise<DatabaseManager> {
-  const sqlite3 = await initSQLite();
-  
-  // Read file as ArrayBuffer
-  const buffer = await file.arrayBuffer();
-  const data = new Uint8Array(buffer);
-  
-  // For wa-sqlite, we need to use a different approach to load file data
-  // Create a new database and populate it with the file data
-  const db = await sqlite3.open_v2(':memory:');
-  
-  // Note: For a proper file-based implementation, we'd need to use
-  // a different VFS (Virtual File System) like OPFS or IDBBatchAtomicVFS
-  // For now, we'll create in-memory and note the filename
-  
-  // Ensure schema exists
-  await sqlite3.exec(db, SCHEMA_SQL);
-  
-  console.log(`DB opened successfully (file: ${file.name}, loaded in memory)`);
-  
-  return {
-    db,
-    sqlite3,
-    async close() {
-      await sqlite3.close(db);
-    },
-    async execute(sql: string, params?: any[]) {
-      if (params && params.length > 0) {
-        for await (const stmt of sqlite3.statements(db, sql)) {
-          sqlite3.bind_collection(stmt, params);
-          await sqlite3.step(stmt);
-        }
-      } else {
-        await sqlite3.exec(db, sql);
-      }
-    },
-    async query(sql: string, params?: any[]) {
-      const results: any[] = [];
-      for await (const stmt of sqlite3.statements(db, sql)) {
-        if (params && params.length > 0) {
-          sqlite3.bind_collection(stmt, params);
-        }
-        const columns = sqlite3.column_names(stmt);
-        while (await sqlite3.step(stmt) === SQLite.SQLITE_ROW) {
-          const row: any = {};
-          columns.forEach((col, i) => {
-            row[col] = sqlite3.column(stmt, i);
-          });
-          results.push(row);
-        }
-      }
-      return results;
-    }
-  };
+  throw new Error(`Opening existing SQLite files is not yet implemented. File: ${file.name}`);
 }
 
 /**
  * Export database to downloadable file
  */
 export async function exportDatabase(dbManager: DatabaseManager, filename: string = 'scrapebook.sqlite'): Promise<void> {
-  const { db, sqlite3 } = dbManager;
-  
-  // For wa-sqlite, we need to serialize the database differently
-  // This is a simplified version - in a real implementation you'd want
-  // to use the proper VFS for file operations
-  
-  // For now, we'll create a simple export by dumping the schema and data
-  console.log(`Export functionality not fully implemented yet for ${filename}`);
-  console.log('Database would be exported here');
+  throw new Error(`Exporting SQLite files is not yet implemented. File: ${filename}`);
 }
