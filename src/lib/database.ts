@@ -1,14 +1,96 @@
 import * as SQLite from 'wa-sqlite';
 import SQLiteESMFactory from 'wa-sqlite/dist/wa-sqlite.mjs';
 
+export class OpKey {
+  static readonly BYTE_LENGTH = 32;
+  readonly #bytes: Uint8Array;
+
+  private constructor(bytes: Uint8Array) {
+    if (bytes.byteLength !== OpKey.BYTE_LENGTH) {
+      throw new Error(`OpKey must be exactly ${OpKey.BYTE_LENGTH} bytes, got ${bytes.byteLength}`);
+    }
+    this.#bytes = new Uint8Array(bytes); // defensive copy
+  }
+
+  /** 32 random bytes */
+  static random(): OpKey {
+    const b = new Uint8Array(OpKey.BYTE_LENGTH);
+    crypto.getRandomValues(b);
+    return new OpKey(b);
+  }
+
+  /** SHA-256 of input (ArrayBuffer or view or string) */
+  static async sha256(input: ArrayBuffer | ArrayBufferView | string): Promise<OpKey> {
+    let buffer: ArrayBuffer;
+    if (typeof input === "string") {
+      const encoded = new TextEncoder().encode(input);
+      buffer = encoded.buffer.slice(encoded.byteOffset, encoded.byteOffset + encoded.byteLength);
+    } else if (input instanceof ArrayBuffer) {
+      buffer = input;
+    } else {
+      // For ArrayBufferView, copy to a new ArrayBuffer
+      const view = new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+      const newBuffer = new ArrayBuffer(view.byteLength);
+      new Uint8Array(newBuffer).set(view);
+      buffer = newBuffer;
+    }
+    const digest = await crypto.subtle.digest("SHA-256", buffer);
+    return new OpKey(new Uint8Array(digest));
+  }
+
+  /** Copy raw bytes out */
+  toBytes(): Uint8Array {
+    return new Uint8Array(this.#bytes);
+  }
+
+  /** Constant-time equality */
+  equals(other: OpKey): boolean {
+    const a = this.#bytes, b = other.#bytes;
+    let diff = a.length ^ b.length;
+    for (let i = 0; i < a.length && i < b.length; i++) diff |= a[i] ^ b[i];
+    return diff === 0;
+  }
+
+  /** Total order: lexicographic by unsigned bytes */
+  static compare(a: OpKey, b: OpKey): number {
+    const A = a.#bytes, B = b.#bytes;
+    for (let i = 0; i < OpKey.BYTE_LENGTH; i++) {
+      if (A[i] !== B[i]) return A[i] - B[i];
+    }
+    return 0;
+  }
+
+  /**
+   * Extend: SHA256( "OpKey/extend" || key || u32be(len(data)) || data )
+   * Length prefix prevents concatenation ambiguities for variable-length data.
+   */
+  async extend(newData: ArrayBuffer | ArrayBufferView | string): Promise<OpKey> {
+    const data =
+      typeof newData === "string"
+        ? new TextEncoder().encode(newData)
+        : newData instanceof ArrayBuffer
+          ? new Uint8Array(newData)
+          : new Uint8Array(newData.buffer, newData.byteOffset, newData.byteLength);
+
+    const total = this.#bytes.length + data.length;
+    const buf = new Uint8Array(total);
+    let o = 0;
+    buf.set(this.#bytes, o); o += this.#bytes.length;
+    buf.set(data, o); o += data.length;
+    const digest = await crypto.subtle.digest("SHA-256", buf);
+    return new OpKey(new Uint8Array(digest));
+  }
+}
+
+
 export interface DbLifecycle {
   initialize(): Promise<void>;
   close(): Promise<void>;
 }
 
 export interface OpDb {
-  expandObservationSets(observationSets: Set<string>) : Promise<Set<string>>;
-  unionObservationSets(observationSets : Set<string>) : Promise<string | null>;
+  expandObservationSets(observationSets: Set<string>): Promise<Set<string>>;
+  unionObservationSets(observationSets: Set<string>): Promise<string | null>;
 }
 
 export interface QueryExecutor {
@@ -205,7 +287,7 @@ export class SqliteOpDb extends SqlOpDb implements DbLifecycle {
   constructor(
     public db: number,
     public sqlite3: any
-  ) { 
+  ) {
     super();
   }
 
