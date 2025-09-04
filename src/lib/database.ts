@@ -1,6 +1,6 @@
 import * as SQLite from 'wa-sqlite';
 import SQLiteESMFactory from 'wa-sqlite/dist/wa-sqlite.mjs';
-import type { Jsonifiable } from 'type-fest';
+import type { Jsonifiable, JsonValue } from 'type-fest';
 
 export class OpKey {
   static readonly BYTE_LENGTH = 32;
@@ -21,13 +21,12 @@ export class OpKey {
   }
 
   /** SHA-256 of input (ArrayBuffer or view or string) */
-  static async sha256(input: string | BufferSource): Promise<OpKey> {
+  static async sha256(input: string | Uint8Array): Promise<OpKey> {
+    //TODO: optimize
     const data =
       typeof input === "string"
         ? new TextEncoder().encode(input)
-        : input instanceof ArrayBuffer
-          ? new Uint8Array(input)
-          : new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
+        : new Uint8Array(input);
 
     const digest = await crypto.subtle.digest("SHA-256", data);
     return new OpKey(new Uint8Array(digest));
@@ -71,14 +70,12 @@ export class OpKey {
    * Extend: SHA256( "OpKey/extend" || key || u32be(len(data)) || data )
    * Length prefix prevents concatenation ambiguities for variable-length data.
    */
-  async extend(newData: string | BufferSource): Promise<OpKey> {
+  async extend(newData: string | Uint8Array): Promise<OpKey> {
+    //TODO: optimize
     const data =
       typeof newData === "string"
         ? new TextEncoder().encode(newData)
-        : newData instanceof ArrayBuffer
-          ? new Uint8Array(newData)
-          : new Uint8Array(newData.buffer, newData.byteOffset, newData.byteLength);
-
+        : new Uint8Array(newData);
     const total = this.#bytes.length + data.length;
     const buf = new Uint8Array(total);
     let o = 0;
@@ -137,6 +134,37 @@ export class OpInput {
   }
 }
 
+export class OpData {
+  constructor(
+    public readonly opKey: OpKey,
+    public readonly opType: string,
+    public readonly toolId: string,
+    public readonly params: JsonValue,
+    public readonly inputDigest: OpKey,
+    public readonly groundTruth: OpKey | null,
+    public readonly observedAt: string | null,
+    public readonly alias: OpKey | null,
+  ) {
+  }
+}
+
+export class Op extends OpData {
+  constructor(
+    public readonly opKey: OpKey,
+    public readonly opType: string,
+    public readonly toolId: string,
+    public readonly params: JsonValue,
+    public readonly inputDigest: OpKey,
+    public readonly groundTruth: OpKey | null,
+    public readonly observedAt: string | null,
+    public readonly alias: OpKey | null,
+    public readonly inputs: OpInput[],
+    public readonly outputs: Uint8Array[]
+  ) {
+    super(opKey, opType, toolId, params, inputDigest, groundTruth, observedAt, alias);
+  }
+}
+
 export interface DbLifecycle {
   initialize(): Promise<void>;
   close(): Promise<void>;
@@ -153,6 +181,8 @@ export interface OpDb {
   resolveInputs(op: OpKey): Promise<OpOutput[]>;
   expandObservationSets(observationSets: Set<string>): Promise<Set<string>>;
   unionObservationSets(observationSets: Set<string>): Promise<string | null>;
+  registerArtifact(data: Uint8Array): Promise<OpKey>;
+  getArtifact(hash: OpKey): Promise<Uint8Array | null>;
 }
 
 export interface QueryExecutor {
@@ -190,7 +220,7 @@ export abstract class SqlOpDb implements OpDb, QueryExecutor {
 
   async getInputs(op: OpKey): Promise<Uint8Array[]> {
     //TODO: can optimize with SQL
-    var result : Uint8Array[] = []
+    var result: Uint8Array[] = []
     for (const output of await this.resolveInputs(op)) {
       result.push(await this.getOutput(output));
     }
@@ -214,6 +244,15 @@ export abstract class SqlOpDb implements OpDb, QueryExecutor {
       return done ? null : value;
     }
     throw Error("observation set union not yet implemented")
+  }
+
+  async registerArtifact(data: Uint8Array): Promise<OpKey> {
+    const hash = await OpKey.sha256(data);
+    throw Error("registerArtifact not yet implemented")
+  }
+
+  async getArtifact(hash: OpKey): Promise<Uint8Array | null> {
+    throw Error("getArtifact not yet implemented")
   }
 }
 
