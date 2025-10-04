@@ -1,0 +1,9 @@
+project:
+  output-dir: _docs
+
+website:
+  title: "scrapebook"
+  site-url: "https://imbrem.github.io/scrapebook"
+  description: "A simple Python library for tracking the provenance of data"
+  repo-branch: main
+  repo-url: "https://github.com/imbrem/scrapebook"
