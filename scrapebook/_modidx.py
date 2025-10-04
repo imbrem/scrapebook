@@ -5,4 +5,7 @@ d = { 'settings': { 'branch': 'main',
                 'doc_host': 'https://imbrem.github.io',
                 'git_url': 'https://github.com/imbrem/scrapebook',
                 'lib_path': 'scrapebook'},
-  'syms': {'scrapebook.core': {'scrapebook.core.say_hello': ('core.html#say_hello', 'scrapebook/core.py')}}}
+  'syms': { 'scrapebook.core': { 'scrapebook.core.HelloSayer': ('core.html#hellosayer', 'scrapebook/core.py'),
+                                 'scrapebook.core.HelloSayer.__init__': ('core.html#hellosayer.__init__', 'scrapebook/core.py'),
+                                 'scrapebook.core.HelloSayer.say': ('core.html#hellosayer.say', 'scrapebook/core.py'),
+                                 'scrapebook.core.say_hello': ('core.html#say_hello', 'scrapebook/core.py')}}}
