@@ -6,10 +6,10 @@
 from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Iterable, Set, Union, Tuple
-import hashlib
 from jsonpath_ng import parse as jsonpath_parse
-import json
-import re
+from abc import ABC, abstractmethod
+from datetime import datetime
+import json, os, hashlib, re
 
 _HEX_RE = re.compile(r'^[0-9a-fA-F]*$')
 
@@ -64,19 +64,20 @@ def hash_json(data: Any) -> bytes:
     return hashlib.sha256(j.encode('utf-8')).digest()
 
 # %% auto 0
-__all__ = ['OP_TAG', 'ART_TAG', 'hex_to_bytes', 'sha256_hex', 'path_for_key', 'extend_path', 'hash_json', 'OperationHeader',
-           'Artifact', 'Operation', 'OperationResult', 'Recorder', 'Scrapebook']
+__all__ = ['OP_TAG', 'ART_TAG', 'OBS_KIND', 'TRANS_KIND', 'hex_to_bytes', 'sha256_hex', 'path_for_key', 'extend_path',
+           'hash_json', 'OperationHeader', 'Artifact', 'Operation', 'OperationResult', 'Recorder', 'Scrapebook']
 
 # %% ../nbs/00_core.ipynb 5
 @dataclass(frozen=True)
 class OperationHeader:
     """Metadata about an operation."""
-    kind: str # e.g. 'observe' or 'transform' 
+    kind: str # e.g. 'obs' or 'trans' 
     task: str # e.g. 'fetch_http', 'parse_article'
     tool: str # e.g. 'requests', 'my_scraper_1'
     output_type: str # e.g. 'http_response', 'article'
-    event_uuid: Optional[str] # e.g. '550e8400-e29b-41d4-a716-446655440000'
+    event_uuid: Optional[bytes] # e.g. '550e8400-e29b-41d4-a716-446655440000'
     timestamp: Optional[str] # e.g. '2024-01-01T12:00:00Z'
+    meta: Any # Arbitrary JSON metadata
 
     def sha256(self) -> bytes:
         """
@@ -84,28 +85,56 @@ class OperationHeader:
         Uses a canonical JSON *list* to preserve field order.
         """
         return hash_json([
-            self.kind, self.task, self.tool, self.output_type, self.event_uuid, 
-            self.timestamp
+            self.kind, self.task, self.tool, self.output_type, 
+            None if self.event_uuid is None else self.event_uuid.hex(), 
+            self.timestamp, self.meta
         ])
+    
+    def op_id(self, inputs, outputs) -> bytes:
+        """
+        Get the operation ID for this header combined with given inputs and outputs.
+        """
+        return hash_json([self.sha256().hex(), inputs, outputs])
 
 # %% ../nbs/00_core.ipynb 6
 # -------- JSON leaf tags --------
 OP_TAG  = "$op"          # {"$op": {"id": "<hex>", "path": "$.a.b[0]"}}
 ART_TAG = "$artifact"    # {"$artifact": "<sha256-hex>"}
 
+OBS_KIND = "obs"
+TRANS_KIND = "trans"
+
 class Artifact:
     """Lazy-loaded bytes referenced by SHA-256; caches after first load."""
     __slots__ = ("book", "sha256", "_cache")
+
     def __init__(self, book: "Scrapebook", sha256: bytes):
         self.book = book
         self.sha256 = sha256
         self._cache: Optional[bytes] = None
+
     def bytes(self) -> bytes:
         if self._cache is None:
-            self._cache = self.book._fetch_artifact_bytes_sha256(self.sha256)
+            self._cache = self.book.fetch_artifact_bytes_sha256(self.sha256)
         return self._cache
+    
     def value(self) -> bytes:
         return self.bytes()
+    
+    def produced_by(self) -> Set[Operation]:
+        """
+        Return the set of operations in the book which produce this artifact
+        """
+        op_ids = self.book.fetch_artifact_produced_by(self.sha256)
+        return {Operation(self.book, op_id) for op_id in op_ids}
+    
+    def consumed_by(self) -> Set[Operation]:
+        """
+        Return the set of operations in the book which directly consume this artifact
+        """
+        op_ids = self.book.fetch_artifact_consumed_by(self.sha256)
+        return {Operation(self.book, op_id) for op_id in op_ids}
+    
     def __repr__(self) -> str:
         return f"<Artifact {self.sha256.hex()}>"
 
@@ -114,30 +143,31 @@ class Operation:
     """Lazy header; decoded results/inputs are cached along with their dependency sets."""
     __slots__ = (
         "book", "id", "_header",
-        "_results_decoded_cache",
-        "_result_artifact_deps_cache",
-        "_inputs_decoded_cache",
-        "_input_artifact_deps_cache", "_input_op_deps_cache",
+        "_results_cache",
+        "_artifacts_produced_cache",
+        "_inputs_cache",
+        "_artifacts_consumed_cache", "_deps_cache",
     )
+
     def __init__(self, book: "Scrapebook", op_id: bytes):
         self.book = book
         self.id = op_id
         self._header: Optional[OperationHeader] = None
 
         # Results caches
-        self._results_decoded_cache: Optional[Any] = None
-        self._result_artifact_deps_cache: Optional[Set[str]] = None
+        self._results_cache: Optional[Any] = None
+        self._artifacts_produced_cache: Optional[Set[str]] = None
 
-        # Inputs caches
-        self._inputs_decoded_cache: Optional[Any] = None
-        self._input_artifact_deps_cache: Optional[Set[str]] = None
-        self._input_op_deps_cache: Optional[Set[bytes]] = None
+        # Input caches
+        self._inputs_cache: Optional[Any] = None
+        self._artifacts_consumed_cache: Optional[Set[Artifact]] = None
+        self._deps_cache: Optional[Set[Operation]] = None
 
     # --- header (lazy) ---
     @property
     def header(self) -> OperationHeader:
         if self._header is None:
-            self._header = self.book._fetch_operation_header(self.id)
+            self._header = self.book.fetch_operation_header(self.id)
         return self._header
 
     @property
@@ -149,64 +179,102 @@ class Operation:
     @property
     def output_type(self) -> str: return self.header.output_type
     @property
-    def event_uuid(self) -> Optional[str]: return self.header.event_uuid
+    def event_uuid(self) -> Optional[bytes]: return self.header.event_uuid
     @property
     def timestamp(self) -> Optional[str]: return self.header.timestamp
+    @property
+    def meta(self) -> Any: return self.header.meta
 
     # --- result-path handles ---
     def __getitem__(self, key: str) -> "OperationResult":
         return self.at(path_for_key(key))
+    
     def at(self, path: str) -> "OperationResult":
+        """Return a handle to the results at the given JSONPath."""
         return OperationResult(self, path)
 
     # --- results JSON (raw / decoded + deps) ---
     def results_json(self) -> Any:
-        return self.book._fetch_results_json(self.id)
+        """
+        Get the raw JSON of an operation's results.
+        
+        This is _not_ cached; see results() for the cached version
+        """
+        return self.book.fetch_results_json(self.id)
 
-    def _ensure_results_decoded(self) -> Any:
-        if self._results_decoded_cache is None:
-            raw = self.book._fetch_results_json(self.id)
+    def _ensure_results(self) -> Any:
+        if self._results_cache is None:
+            raw = self.book.fetch_results_json(self.id)
             arts = set()
             decoded = self.book.decode_json(raw, arts=arts)
-            self._results_decoded_cache = decoded
-            self._result_artifact_deps_cache = arts
-        return self._results_decoded_cache
+            self._results_cache = decoded
+            self._artifacts_produced_cache = arts
+        return self._results_cache
 
-    def results_decoded(self) -> Any:
-        return self._ensure_results_decoded()
+    def results(self) -> Any:
+        """
+        Get the results of an operation
+        """
+        return self._ensure_results()
 
-    def result_artifact_deps(self) -> Set[str]:
-        if self._result_artifact_deps_cache is None:
-            self._ensure_results_decoded()
-        return self._result_artifact_deps_cache or set()
+    def artifacts_produced(self) -> Set[str]:
+        """
+        Return the set of artifacts produced by this operation.
+        """
+        if self._artifacts_produced_cache is None:
+            self._ensure_results()
+        return self._artifacts_produced_cache or set()
 
     # --- inputs JSON (raw / decoded + deps) ---
     def inputs_json(self) -> Any:
-        return self.book._fetch_inputs_json(self.id)
+        """
+        Get the raw JSON of an operation's inputs.
+        
+        This is _not_ cached; see inputs() for the cached version
+        """
+        return self.book.fetch_inputs_json(self.id)
 
-    def _ensure_inputs_decoded(self) -> Any:
-        if self._inputs_decoded_cache is None:
-            raw = self.book._fetch_inputs_json(self.id)
+    def _ensure_inputs(self) -> Any:
+        if self._inputs_cache is None:
+            raw = self.book.fetch_inputs_json(self.id)
             arts = set()
             ops = set()
             decoded = self.book.decode_json(raw, ops=ops, arts=arts)
-            self._inputs_decoded_cache = decoded
-            self._input_artifact_deps_cache = arts
-            self._input_op_deps_cache = ops
-        return self._inputs_decoded_cache
+            self._inputs_cache = decoded
+            self._artifacts_consumed_cache = arts
+            self._deps_cache = ops
+        return self._inputs_cache
 
-    def inputs_decoded(self) -> Any:
-        return self._ensure_inputs_decoded()
+    def inputs(self) -> Any:
+        """
+        Get an operation's inputs
+        """
+        return self._ensure_inputs()
 
-    def input_artifact_deps(self) -> Set[str]:
-        if self._input_artifact_deps_cache is None:
-            self._ensure_inputs_decoded()
-        return self._input_artifact_deps_cache or set()
+    def artifacts_consumed(self) -> Set[Artifact]:
+        """
+        Get an operation's consumed artifacts
+        """
+        if self._artifacts_consumed_cache is None:
+            self._ensure_inputs()
+        return self._artifacts_consumed_cache or set()
 
-    def input_op_deps(self) -> Set[bytes]:
-        if self._input_op_deps_cache is None:
-            self._ensure_inputs_decoded()
-        return self._input_op_deps_cache or set()
+    def deps(self) -> Set[Operation]:
+        """
+        Get the dependencies of this operation
+        """
+        if self._deps_cache is None:
+            self._ensure_inputs()
+        return self._deps_cache or set()
+
+    def used_by(self) -> Set[Operation]:
+        """
+        Get the set of operations visible in the book used by this operation.
+        """
+        return {
+            Operation(self.book, op_id) 
+            for op_id in self.book.fetch_artifact_consumed_by_many(self.artifacts_produced())
+        }
 
     # --- JSON leaf builders for constructing inputs ---
     def op_ref(self) -> Dict[str, Any]:
@@ -217,7 +285,25 @@ class Operation:
 
     # --- values via decoded cache ---
     def value(self) -> Any:
-        return self.results_decoded()
+        return self.results()
+
+    def validate(self):
+        """
+        Validate that this operation is well-formed.
+
+        Currently checks that:
+        - The hash of this operation matches its ID
+        - No other operation's results are referenced in this operation's results
+        """
+        inputs = self.inputs_json()
+        results = self.results_json()
+        assert self.header.op_id(inputs, results) == self.id, \
+            f"Operation ID mismatch for {self.id.hex()}"
+        deps = set()
+        input_arts = set()
+        self.book.decode_json(inputs, ops=deps, arts=input_arts)
+        output_arts = set()
+        self.book.decode_json(results, arts=output_arts)
 
     def __repr__(self) -> str:
         return f"<Operation {self.id.hex()}>"
@@ -243,7 +329,7 @@ class OperationResult:
         - 1 match   -> the value
         - >1 matches-> list of values
         """
-        decoded = self.op._ensure_results_decoded()
+        decoded = self.op._ensure_results()
         expr = jsonpath_parse(self.path)
         matches = [m.value for m in expr.find(decoded)]
         if not matches:
@@ -276,26 +362,40 @@ class Recorder:
         self.tool = tool
         self.output_type = output_type
 
-    def record(self, inputs: Any, results: Any) -> Operation:
-        op_deps: Set[bytes] = set()
+    def record(self, inputs: Any, results: Any, meta: Any = None) -> Operation:
+        deps: Set[bytes] = set()
         input_arts: Set[bytes] = set()
         output_arts: Set[bytes] = set()
         # allow op refs; collect deps
-        enc_inputs  = self._encode(inputs, ops=op_deps, arts=input_arts) 
+        enc_inputs  = self._encode(inputs, ops=deps, arts=input_arts) 
         # forbid op refs in results 
-        enc_results = self._encode(results, ops=None, arts=output_arts)    
-        op_id = self.book._persist_operation(
+        enc_results = self._encode(results, ops=None, arts=output_arts)
+          
+        # generate a UUID and timestamp if this is an observation
+        if self.kind == OBS_KIND:
+            event_uuid = os.urandom(32)
+            timestamp = datetime.now().isoformat()
+        else:
+            event_uuid = None
+            timestamp = None
+
+        header = OperationHeader(
             kind=self.kind,
             task=self.task,
             tool=self.tool,
             output_type=self.output_type,
+            event_uuid=event_uuid,
+            timestamp=timestamp,
+            meta=meta
+        )
+
+        op_id = self.book.persist_operation(
+            header=header,
             inputs_json=enc_inputs,
             results_json=enc_results,
-            op_deps=op_deps,
+            deps=deps,
             input_arts=input_arts,
             output_arts=output_arts,
-            event_uuid=None,
-            timestamp=None,
         )
         return Operation(self.book, op_id)
 
@@ -320,8 +420,11 @@ class Recorder:
             arts.add(obj.sha256)
             return {ART_TAG: obj.sha256.hex()}
         if isinstance(obj, (bytes, bytearray, memoryview)):
-            h = self.book._put_artifact_sha256(bytes(obj)).hex()  # -> "<hex>"
-            return {ART_TAG: h}
+            sha256 = self.book.put_artifact_sha256(bytes(obj))  # -> "<hex>"
+            if arts is None:
+                raise ValueError("Artifact references are not allowed here (arts=None).")
+            arts.add(sha256)
+            return {ART_TAG: sha256.hex()}
 
         # containers / primitives
         if isinstance(obj, dict):
@@ -330,69 +433,87 @@ class Recorder:
             return [self._encode(v, ops=ops, arts=arts) for v in obj]
         return obj
 
-
-# -------- Scrapebook (DB façade; stubs + ALWAYS-collect decoder) --------
-class Scrapebook:
-    def __init__(self):
-        # map operation ids to headers + inputs + outputs
-        self.ops = dict()
-        self.arts = dict()
-        pass
-
+class Scrapebook(ABC):
+    """
+    An ABC exposing the basic API for Scrapebook
+    """
     def recorder(self, *, kind: str, task: str, tool: str, output_type: str) -> Recorder:
         return Recorder(self, kind=kind, task=task, tool=tool, output_type=output_type)
 
     def obs_recorder(self, *, task: str, tool: str, output_type: str) -> Recorder:
-        return self.recorder(kind="observe", task=task, tool=tool, output_type=output_type)
+        return self.recorder(kind=OBS_KIND, task=task, tool=tool, output_type=output_type)
 
     def trans_recorder(self, *, task: str, tool: str, output_type: str) -> Recorder:
-        return self.recorder(kind="transform", task=task, tool=tool, output_type=output_type)
+        return self.recorder(kind=TRANS_KIND, task=task, tool=tool, output_type=output_type)
 
-    # persistence
-    def _persist_operation(
+    @abstractmethod
+    def persist_operation(
         self,
         *,
-        kind: str,
-        task: str,
-        tool: str,
-        output_type: str,
+        header: OperationHeader,
         inputs_json: Any,
         results_json: Any,
-        op_deps: Set[bytes],
+        deps: Set[bytes],
         input_arts: Set[bytes],
         output_arts: Set[bytes],
-        event_uuid: Optional[str],
-        timestamp: Optional[str],
     ) -> bytes:
-        #TODO: store op deps
-        header = OperationHeader(kind, task, tool, output_type, event_uuid, timestamp)
-        op_id = hash_json([header.sha256().hex(), inputs_json, results_json])
-        self.ops[op_id] = { "header" : header, "input" : inputs_json, "result" : results_json}
-        return op_id
+        """
+        Persist an operation into the database
 
-    # header
-    def _fetch_operation_header(self, op_id: bytes) -> OperationHeader:
-        return self.ops[op_id]["header"]
+        Returns its ID, which is a deterministic SHA-256 hash of the operation's contents.
+        """
 
-    # JSON fetch
-    def _fetch_results_json(self, op_id: bytes) -> Any:
-        return self.ops[op_id]["result"]
+    @abstractmethod
+    def fetch_operation_header(self, op_id: bytes) -> OperationHeader:
+        """
+        Fetch an operation header by its ID.
+        """
+
+    @abstractmethod
+    def fetch_results_json(self, op_id: bytes) -> Any:
+        """
+        Fetch the raw JSON of an operation's results by its ID
+        """
     
-    def _fetch_inputs_json(self, op_id: bytes) -> Any:
-        return self.ops[op_id]["input"]
+    @abstractmethod
+    def fetch_inputs_json(self, op_id: bytes) -> Any:
+        """
+        Fetch the raw JSON of an operation's inputs by its ID
+        """
 
-    # artifacts (fixed SHA-256)
-    def _put_artifact_sha256(self, data: bytes) -> bytes:
-        """Store bytes content-addressed by SHA-256 and return the hex hash."""
-        hash = hashlib.sha256(data).digest()
-        self.arts[hash] = data
-        return hash
+    @abstractmethod
+    def put_artifact_sha256(self, data: bytes) -> bytes:
+        """
+        Store bytes content-addressed by SHA-256 and return the hash as bytes.
+        """
     
-    def _fetch_artifact_bytes_sha256(self, sha256: bytes) -> bytes:
-        return self.arts[sha256]
+    @abstractmethod
+    def fetch_artifact_bytes_sha256(self, sha256: bytes) -> bytes:
+        """
+        Given the hash of a string of bytes, return the original bytes if known.
+        """
+
+    @abstractmethod
+    def fetch_artifact_produced_by(self, sha256: bytes) -> Iterable[bytes]:
+        """
+        Given the hash of an artifact, return the set of operation IDs that produce it.
+        """
+
+    @abstractmethod
+    def fetch_artifact_consumed_by(self, sha256: bytes) -> Iterable[bytes]:
+        """
+        Given the hash of an artifact, return the set of operation IDs that consume it.
+        """
+
+    @abstractmethod
+    def fetch_op_ids(self) -> Iterable[bytes]:
+        """
+        Get an iterator over all operation IDs in the book.
+        """
 
     def decode_json(
-            self, node: Any, *, ops: Set[bytes] = None, arts: Set[bytes] = None) -> Any:
+            self, node: Any, *, ops: Set[Operation] = None, arts: Set[Artifact] = None
+        ) -> Any:
         """
         Decode JSON leaves back to handles, collecting dependencies along the way.
 
@@ -413,7 +534,7 @@ class Scrapebook:
                     path = spec.get("path", "$")
                 except:
                     raise ValueError(f"Invalid operation reference: {node!r}")
-                ops.add(op.id)
+                ops.add(op)
                 return OperationResult(op, path)
             if ART_TAG in node:
                 if arts is None:
@@ -422,9 +543,18 @@ class Scrapebook:
                     sha = hex_to_bytes(node[ART_TAG])
                 except:
                     raise ValueError(f"Invalid artifact reference: {node!r}") 
-                arts.add(sha)
-                return Artifact(self, sha)
+                art = Artifact(self, sha)
+                arts.add(art)
+                return art
             return {k: self.decode_json(v, ops=ops, arts=arts) for k, v in node.items()}
         if isinstance(node, list):
             return [self.decode_json(v, ops=ops, arts=arts) for v in node]
         return node
+    
+    def validate(self) -> int:
+        """Validate this ScrapebookDict for internal consistency."""
+        validated = 0
+        for op in self.fetch_op_ids():
+            Operation(self, op).validate()
+            validated += 1
+        return validated
