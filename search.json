@@ -1,0 +1,52 @@
+[
+  {
+    "objectID": "core.html",
+    "href": "core.html",
+    "title": "core",
+    "section": "",
+    "text": "We begin with some helper functions\n\nsource\n\nhash_json\n\n hash_json (data:Any)\n\nCompute a SHA-256 hash of JSON-serializable data.\n\nsource\n\n\nextend_path\n\n extend_path (base:str, key_or_index:Union[str,int])\n\nAppend a segment to a JSONPath using bracket notation.\n\nsource\n\n\npath_for_key\n\n path_for_key (key:str)\n\nGet a JSONPath for a given key using bracket notation.\n\nsource\n\n\nsha256_hex\n\n sha256_hex (data:bytes)\n\nGet the hex digest of the SHA-256 hash of the given data\n\nsource\n\n\nhex_to_bytes\n\n hex_to_bytes (h:str)\n\n*Convert a hex string to raw bytes.\nAccepts optional ‘0x’ prefix and common separators (space, underscore, hyphen, colon). Raises TypeError for non-str inputs and ValueError for invalid hex or odd length after cleaning.*\n\nsource\n\n\nOperationHeader\n\n OperationHeader (kind:str, task:str, tool:str, output_type:str,\n                  event_uuid:Optional[bytes], timestamp:Optional[str],\n                  meta:Any)\n\nMetadata about an operation.\n\nsource\n\n\nScrapebook\n\n Scrapebook ()\n\nAn ABC exposing the basic API for Scrapebook\n\nsource\n\n\nRecorder\n\n Recorder (book:Scrapebook, kind:str, task:str, tool:str, output_type:str)\n\nFixed (kind, task, tool, output_type).\n\nsource\n\n\nOperationResult\n\n OperationResult (op:__main__.Operation, path:str)\n\nHandle: (Operation, JSONPath) into that operation’s decoded results. Supports subscripting to extend the path: op[“a”][“b”][0]\n\nsource\n\n\nOperation\n\n Operation (book:Scrapebook, op_id:bytes)\n\nLazy header; decoded results/inputs are cached along with their dependency sets.\n\nsource\n\n\nArtifact\n\n Artifact (book:Scrapebook, sha256:bytes)\n\nLazy-loaded bytes referenced by SHA-256; caches after first load.\n\nsource\n\n\nOperationResult.value\n\n OperationResult.value ()\n\nEvaluate JSONPath on the op’s decoded cached results. - 0 matches -&gt; None - 1 match -&gt; the value - &gt;1 matches-&gt; list of values\n\nsource\n\n\nOperation.inputs\n\n Operation.inputs ()\n\nGet an operation’s inputs\n\nsource\n\n\nOperation.results\n\n Operation.results ()\n\nGet the results of an operation\n\nclass ScrapebookDict(Scrapebook):\n    def __init__(self):\n        self.ops = dict()\n        self.arts = dict()\n        self.deps = dict()\n        self.op_used_by = dict()\n        self.produced_by = dict()\n        self.consumed_by = dict()\n        pass\n\n    # persistence\n    def persist_operation(\n        self,\n        *,\n        header: OperationHeader,\n        inputs_json: Any,\n        results_json: Any,\n        deps: Set[bytes],\n        input_arts: Set[bytes],\n        output_arts: Set[bytes]\n    ) -&gt; bytes:\n        op_id = header.op_id(inputs_json, results_json)\n        self.ops[op_id] = { \"header\" : header, \"input\" : inputs_json, \"result\" : results_json}\n        for dep in deps:\n            self.op_used_by.setdefault(dep, set()).add(op_id)\n            self.deps.setdefault(op_id, set()).add(dep)\n        for art in input_arts:\n            self.consumed_by.setdefault(art, set()).add(op_id)\n        for art in output_arts:\n            self.produced_by.setdefault(art, set()).add(op_id)\n        return op_id\n\n    def fetch_operation_header(self, op_id: bytes) -&gt; OperationHeader:\n        return self.ops[op_id][\"header\"]\n\n    def fetch_results_json(self, op_id: bytes) -&gt; Any:\n        return self.ops[op_id][\"result\"]\n    \n    def fetch_inputs_json(self, op_id: bytes) -&gt; Any:\n        return self.ops[op_id][\"input\"]\n\n    def fetch_op_ids(self) -&gt; Iterable[bytes]:\n        return self.ops.keys()\n\n    def put_artifact_sha256(self, data: bytes) -&gt; bytes:\n        \"\"\"Store bytes content-addressed by SHA-256 and return the hex hash.\"\"\"\n        hash = hashlib.sha256(data).digest()\n        self.arts[hash] = data\n        return hash\n    \n    def fetch_artifact_bytes_sha256(self, sha256: bytes) -&gt; bytes:\n        return self.arts[sha256]\n    \n    def fetch_artifact_produced_by(self, sha256: bytes) -&gt; Iterable[bytes]:\n        \"\"\"\n        Given the hash of an artifact, return the set of operation IDs that produce it.\n        \"\"\"\n        return self.produced_by.get(sha256, set())\n\n    def fetch_artifact_consumed_by(self, sha256: bytes) -&gt; Iterable[bytes]:\n        \"\"\"\n        Given the hash of an artifact, return the set of operation IDs that consume it.\n        \"\"\"\n        return self.consumed_by.get(sha256, set())\n\n\nbook = ScrapebookDict()\n\n\nscrapes = book.obs_recorder(task=\"scrape_site\", tool=\"demo\", output_type=\"http_response\")\n\n\nop = scrapes.record({\"url\": \"http://example.com\"}, {\"status\": 200, \"content\": b\"hello\"})\nop.validate()\n\n\nbook.fetch_artifact_produced_by(op.id)\n\nset()\n\n\n\n(op, op.kind, op.task, op.tool, op.output_type, op.event_uuid.hex(), op.timestamp, op.meta)\n\n(&lt;Operation ae67f785a7e39b117161a13fdd2d6a5139f3e42d8bea6f9e3b264e853a45d784&gt;,\n 'obs',\n 'scrape_site',\n 'demo',\n 'http_response',\n '0321dd21d2eabb8da0ea55383fabc053e4bccf7dc2f87c1de29404f0eee5b466',\n '2025-10-05T02:58:41.209504',\n None)\n\n\n\nop.results_json()\n\n{'status': 200,\n 'content': {'$artifact': '2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824'}}\n\n\n\nop.results()\n\n{'status': 200,\n 'content': &lt;Artifact 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824&gt;}\n\n\n\nop[\"content\"].value().bytes()\n\nb'hello'\n\n\n\nop[\"content\"]\n\n&lt;OperationResult id=ae67f785a7e39b117161a13fdd2d6a5139f3e42d8bea6f9e3b264e853a45d784 path='$[\"content\"]'&gt;\n\n\n\narticles = book.trans_recorder(task=\"parse_article\", tool=\"demo2\", output_type=\"article\")\n\n\nop2 = articles.record({\"content\" : op[\"content\"], \"mode\": \"cool\"}, \"good article\")\n\n\n(\n    op2, op2.kind, op2.task, op2.tool, op2.output_type, op2.event_uuid, \n    op2.timestamp, op2.meta\n)\n\n(&lt;Operation d37127eba9c227c45f73d26c34d4305f90ceff4a0f253577e809a32bbc243cc8&gt;,\n 'trans',\n 'parse_article',\n 'demo2',\n 'article',\n None,\n None,\n None)\n\n\n\nop2.value()\n\n'good article'\n\n\n\nop2.inputs()\n\n{'content': &lt;OperationResult id=ae67f785a7e39b117161a13fdd2d6a5139f3e42d8bea6f9e3b264e853a45d784 path='$[\"content\"]'&gt;,\n 'mode': 'cool'}\n\n\n\n[dep for dep in op2.deps()]\n\n[&lt;Operation ae67f785a7e39b117161a13fdd2d6a5139f3e42d8bea6f9e3b264e853a45d784&gt;]\n\n\n\nop3 = articles.record(\n    {\"content\" : op[\"content\"], \"mode\": op2, \"status\": op[\"status\"]}, \n    \"better article\"\n)\n\n\nop3\n\n&lt;Operation f60c4785522a91181c5110336408465d2591b9f34a59b231ec2e5deea6b48377&gt;\n\n\n\nop3.value()\n\n'better article'\n\n\n\n[dep for dep in op3.deps()]\n\n[&lt;Operation ae67f785a7e39b117161a13fdd2d6a5139f3e42d8bea6f9e3b264e853a45d784&gt;,\n &lt;Operation d37127eba9c227c45f73d26c34d4305f90ceff4a0f253577e809a32bbc243cc8&gt;,\n &lt;Operation ae67f785a7e39b117161a13fdd2d6a5139f3e42d8bea6f9e3b264e853a45d784&gt;]\n\n\n\nop\n\n&lt;Operation ae67f785a7e39b117161a13fdd2d6a5139f3e42d8bea6f9e3b264e853a45d784&gt;\n\n\n\nop.validate()\n\n\nop.artifacts_produced()\n\n{&lt;Artifact 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824&gt;}\n\n\n\nbook.validate()\n\n3",
+    "crumbs": [
+      "core"
+    ]
+  },
+  {
+    "objectID": "index.html",
+    "href": "index.html",
+    "title": "scrapebook",
+    "section": "",
+    "text": "This file will become your README and also the index of your documentation.",
+    "crumbs": [
+      "scrapebook"
+    ]
+  },
+  {
+    "objectID": "index.html#developer-guide",
+    "href": "index.html#developer-guide",
+    "title": "scrapebook",
+    "section": "Developer Guide",
+    "text": "Developer Guide\nIf you are new to using nbdev here are some useful pointers to get you started.\n\nInstall scrapebook in Development mode\n# make sure scrapebook package is installed in development mode\n$ pip install -e .\n\n# make changes under nbs/ directory\n# ...\n\n# compile to have changes apply to scrapebook\n$ nbdev_prepare",
+    "crumbs": [
+      "scrapebook"
+    ]
+  },
+  {
+    "objectID": "index.html#usage",
+    "href": "index.html#usage",
+    "title": "scrapebook",
+    "section": "Usage",
+    "text": "Usage\n\nInstallation\nInstall latest from the GitHub repository:\n$ pip install git+https://github.com/imbrem/scrapebook.git\nor from conda\n$ conda install -c imbrem scrapebook\nor from pypi\n$ pip install scrapebook\n\n\nDocumentation\nDocumentation can be found hosted on this GitHub repository’s pages. Additionally you can find package manager specific guidelines on conda and pypi respectively.",
+    "crumbs": [
+      "scrapebook"
+    ]
+  },
+  {
+    "objectID": "index.html#how-to-use",
+    "href": "index.html#how-to-use",
+    "title": "scrapebook",
+    "section": "How to use",
+    "text": "How to use\nFill me in please! Don’t forget code examples:\n\n1+1\n\n2",
+    "crumbs": [
+      "scrapebook"
+    ]
+  }
+]
